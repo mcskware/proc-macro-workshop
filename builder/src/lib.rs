@@ -16,19 +16,19 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // builder struct and struct.builder fn
     let quoted_builder = quote!(
         pub struct #builder {
-            executable: String,
-            args: Vec<String>,
-            env: Vec<String>,
-            current_dir: String,
+            executable: Option<String>,
+            args: Option<Vec<String>>,
+            env: Option<Vec<String>>,
+            current_dir: Option<String>,
         }
 
         impl #struct_name {
             pub fn builder() -> #builder {
                 #builder {
-                    executable: String::new(),
-                    args: vec!(),
-                    env: vec!(),
-                    current_dir: String::new(),
+                    executable: Some(String::new()),
+                    args: Some(vec!()),
+                    env: Some(vec!()),
+                    current_dir: Some(String::new()),
                 }
             }
         }
@@ -45,7 +45,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     let q = quote!(
                         impl #builder {
                             pub fn #name (&mut self, #name : #typ) -> &mut Self {
-                                self.#name = #name;
+                                self.#name = Some(#name);
                                 self
                             }
                         }
@@ -61,12 +61,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // builder.build()
     let q = quote!(
         impl #builder {
-            pub fn build(self) -> Result<#struct_name, Box<dyn std::error::Error>> {
+            pub fn build(&mut self) -> Result<#struct_name, Box<dyn std::error::Error>> {
                 let s = #struct_name {
-                    executable: self.executable,
-                    args: self.args,
-                    env: self.env,
-                    current_dir: self.current_dir,
+                    executable: self.executable.take().unwrap(),
+                    args: self.args.take().unwrap(),
+                    env: self.env.take().unwrap(),
+                    current_dir: self.current_dir.take().unwrap(),
                 };
                 Ok(s)
             }
