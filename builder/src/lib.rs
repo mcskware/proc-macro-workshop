@@ -61,50 +61,26 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 for f in &fields.named {
                     let name = &f.ident;
                     let typ = &f.ty;
-                    let mut was_option = false;
-                    if let syn::Type::Path(path) = typ {
-                        #[allow(clippy::collapsible_if)]
-                        if path.qself.is_none() {
-                            // only one thing inside the Option (Option takes a single generic argument)
-                            if path.path.segments.len() == 1 {
-                                let segment = path.path.segments.first().unwrap();
-                                let ident = &segment.ident;
-                                // are we an Option?
-                                if ident == &Ident::new("Option", Span::call_site().into()) {
-                                    if let syn::PathArguments::AngleBracketed(args) =
-                                        &segment.arguments
-                                    {
-                                        was_option = true;
-                                        let a = args.args.first().unwrap();
-                                        match a {
-                                            syn::GenericArgument::Type(t) => {
-                                                // we have Option<Foo> where t = Foo
-                                                let q = quote!(
-                                                    impl #builder {
-                                                        pub fn #name (&mut self, #name : #t) -> &mut Self {
-                                                            self.#name = Some(Some(#name));
-                                                            self
-                                                        }
-                                                    }
-                                                );
-                                                res.extend(TokenStream::from(q));
-                                                build_initializations.extend(quote!(
-                                                    #name: if self.#name.is_some() {
-                                                        self.#name.take().unwrap()
-                                                    } else {
-                                                        None
-                                                    },
-                                                ));
-                                            }
-                                            _ => unimplemented!(),
-                                        }
-                                    }
+
+                    let opt_typ = get_option_type(f);
+                    if let Some(t) = opt_typ {
+                        let q = quote!(
+                            impl #builder {
+                                pub fn #name (&mut self, #name : #t) -> &mut Self {
+                                    self.#name = Some(Some(#name));
+                                    self
                                 }
                             }
-                        }
-                    }
-                    if !was_option {
-                        // setter for each field
+                        );
+                        res.extend(TokenStream::from(q));
+                        build_initializations.extend(quote!(
+                            #name: if self.#name.is_some() {
+                                self.#name.take().unwrap()
+                            } else {
+                                None
+                            },
+                        ));
+                    } else {
                         let q = quote!(
                             impl #builder {
                                 pub fn #name (&mut self, #name : #typ) -> &mut Self {
@@ -145,4 +121,32 @@ pub fn derive(input: TokenStream) -> TokenStream {
     res.extend(TokenStream::from(q));
 
     res
+}
+
+fn get_option_type(field: &syn::Field) -> Option<&syn::Type> {
+    let typ = &field.ty;
+
+    if let syn::Type::Path(path) = typ {
+        #[allow(clippy::collapsible_if)]
+        if path.qself.is_none() {
+            // only one thing inside the Option (Option takes a single generic argument)
+            if path.path.segments.len() == 1 {
+                let segment = path.path.segments.first().unwrap();
+                let ident = &segment.ident;
+                // are we an Option?
+                if ident == &Ident::new("Option", Span::call_site().into()) {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        let a = args.args.first().unwrap();
+                        match a {
+                            syn::GenericArgument::Type(t) => {
+                                return Some(t);
+                            }
+                            _ => unimplemented!(),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
