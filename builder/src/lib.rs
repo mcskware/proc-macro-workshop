@@ -1,3 +1,4 @@
+use indoc::indoc;
 use proc_macro::{Span, TokenStream};
 use quote::quote;
 
@@ -32,6 +33,7 @@ struct AnnotatedField {
     /// If the field is an `Option` field, this type will represent what `Type` is in
     /// the `Option`. If the field is a `Vec`, it will represent what is in the `Vec`.
     inner_type: Option<Type>,
+    parsed: Option<TokenStream>,
 }
 
 impl From<&Field> for AnnotatedField {
@@ -40,7 +42,7 @@ impl From<&Field> for AnnotatedField {
         let name = ident.clone().expect("Field has a name");
         let ty = field.ty.clone();
         let opt_typ = get_option_type(field);
-        let setter = get_each_setter(field);
+        let (setter, parsed) = get_each_setter(field);
         let inner_type = if opt_typ.is_some() {
             let t = opt_typ.unwrap();
             let t = t.clone();
@@ -58,6 +60,7 @@ impl From<&Field> for AnnotatedField {
             is_optional: opt_typ.is_some(),
             one_by_one_setter: setter,
             inner_type,
+            parsed,
         }
     }
 }
@@ -153,6 +156,10 @@ impl AnnotatedField {
         let it = &self.inner_type;
 
         let mut q = quote!();
+
+        if self.parsed.is_some() {
+            return self.parsed.clone().unwrap().into();
+        }
 
         if let Some(setter_name) = &self.one_by_one_setter {
             // one by one
@@ -344,7 +351,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     res
 }
 
-fn get_each_setter(f: &syn::Field) -> Option<Ident> {
+fn get_each_setter(f: &syn::Field) -> (Option<Ident>, Option<TokenStream>) {
     for a in &f.attrs {
         //eprintln!("Attr {}", a.to_token_stream());
         if let Some(ident) = a.path().get_ident() {
@@ -363,16 +370,25 @@ fn get_each_setter(f: &syn::Field) -> Option<Ident> {
                                 if let Lit::Str(lstr) = name.lit {
                                     let s = lstr.value();
                                     //eprintln!("each setter is {s}");
-                                    return Some(Ident::new(&s, Span::call_site().into()));
+                                    return (Some(Ident::new(&s, Span::call_site().into())), None);
                                 }
                             }
+                        } else {
+                            let ts = syn::Error::new_spanned(
+                                &a.meta,
+                                indoc! {r#"
+                                    expected `builder(each = "...")`
+                                "#},
+                            )
+                            .into_compile_error();
+                            return (None, Some(ts.into()));
                         }
                     }
                 }
             }
         }
     }
-    None
+    (None, None)
 }
 
 fn get_option_type(field: &syn::Field) -> Option<&syn::Type> {
