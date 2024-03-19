@@ -1,4 +1,5 @@
 use derive_builder as _;
+use indoc as _;
 use proc_macro2 as _;
 use quote as _;
 use syn as _;
