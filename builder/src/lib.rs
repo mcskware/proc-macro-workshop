@@ -1,10 +1,292 @@
 use proc_macro::{Span, TokenStream};
 use quote::quote;
+use quote::ToTokens;
 
+use syn::parse::Parse;
+use syn::Expr;
+use syn::Field;
+use syn::Lit;
+use syn::Meta;
+use syn::MetaNameValue;
+use syn::Type;
 use syn::{parse_macro_input, DeriveInput, Ident};
 
+struct AnnotatedField {
+    /// The field name
+    name: Ident,
+    /// The field type, like `u8` or `Option<String>`
+    ty: Type,
+    /// Is this field an `Option` field?
+    is_optional: bool,
+    /// Optional name of a one-by-one setter function, declared via:
+    /// ```rust
+    /// # struct Foo {
+    ///     #[builder(each = baz)]
+    ///     my_field: Vec<String>,
+    /// # }
+    /// ```
+    /// In this case, a setter function named `baz` will be created that adds to the
+    /// growing `Vec<String>`, taking a `String`, and can be called repeatedly.
+    one_by_one_setter: Option<Ident>,
+    /// If the field is an `Option` field, this type will represent what `Type` is in
+    /// the `Option`. If the field is a `Vec`, it will represent what is in the `Vec`.
+    inner_type: Option<Type>,
+}
+
+impl From<&Field> for AnnotatedField {
+    fn from(field: &Field) -> Self {
+        let ident = &field.ident;
+        let name = ident.clone().expect("Field has a name");
+        let ty = field.ty.clone();
+        let opt_typ = get_option_type(field);
+        let setter = get_each_setter(field);
+        let inner_type = if opt_typ.is_some() {
+            let t = opt_typ.unwrap();
+            let t = t.clone();
+            Some(t)
+        } else if setter.is_some() {
+            let t = get_vec_type(field).unwrap().clone();
+            Some(t)
+        } else {
+            None
+        };
+
+        Self {
+            name,
+            ty,
+            is_optional: opt_typ.is_some(),
+            one_by_one_setter: setter,
+            inner_type,
+        }
+    }
+}
+
+impl AnnotatedField {
+    /// This function creates individual lines used to define the *Foo*Builder struct.
+    /// For example, if we have
+    /// ```rust
+    /// struct Foo {
+    ///     alpha: String,
+    ///     beta: Option<u8>,
+    ///     gamma: Vec<String>,
+    /// }
+    /// ```
+    /// then this function will generate one of the definition lines for *Foo*Builder, like
+    /// ```rust
+    /// # struct Foo {
+    ///     beta: Option<Option<String>>,
+    /// # }
+    /// ```
+    /// Note that in general the builder will use Options wrapping the actual type.
+    /// This is to help the builder know if the user has supplied a value for this
+    /// particular field.
+    fn get_builder_declaration(&self) -> proc_macro2::TokenStream {
+        let name = &self.name;
+        let ty = &self.ty;
+        quote!(
+            #name : Option<#ty>,
+        )
+    }
+
+    /// This function creates individual lines used to initialize the *Foo*Builder struct
+    /// when the user calls `Builder::builder()`. For example, if we have
+    /// ```rust
+    /// struct Foo {
+    ///     alpha: String,
+    ///     beta: Option<u8>,
+    ///     gamma: Vec<String>,
+    /// }
+    /// ```
+    /// then this function will generate one of the initialization lines for *Foo*Builder, like
+    /// ```rust
+    /// # struct Foo {
+    ///     alpha: None,
+    /// # }
+    /// ```
+    /// Note that in general the builder will default to a `None` value, since the builder
+    /// wraps fields in an Option to ensure they have been provided.
+    fn get_builder_initializer(&self) -> proc_macro2::TokenStream {
+        let name = &self.name;
+        if self.one_by_one_setter.is_some() {
+            quote!(
+                #name : Some(Vec::new()),
+            )
+        } else {
+            quote!(
+                #name : None,
+            )
+        }
+    }
+
+    /// This function creates individual setter functions used to set values in the *Foo*Builder struct
+    /// when the user calls `Builder::setter()`. For example, if we have
+    /// ```rust
+    /// struct Foo {
+    ///     alpha: String,
+    ///     beta: Option<u8>,
+    ///     gamma: Vec<String>,
+    /// }
+    /// ```
+    /// then this function will generate one of the setter functions for *Foo*Builder, like
+    /// ```rust
+    /// impl FooBuilder {
+    ///     pub fn alpha(&mut self, alpha: String) -> &mut Self {
+    ///         self.alpha = Some(alpha);
+    ///         self
+    ///     }
+    /// }
+    /// ```
+    /// If the field was also marked with `#[builder(each = baz)`, then the function will
+    /// include a setter for one-by-one setting.
+    fn get_builder_setter(&self) -> proc_macro2::TokenStream {
+        let name = &self.name;
+        let ty = &self.ty;
+        let it = &self.inner_type;
+
+        let mut q = quote!();
+
+        if let Some(setter_name) = &self.one_by_one_setter {
+            // one by one
+            let it = it.clone().unwrap();
+            q.extend(quote!(
+                pub fn #setter_name (&mut self, value: #it) -> &mut Self {
+                    self.#name.as_mut().unwrap().push(value);
+                    self
+                }
+            ));
+        }
+
+        if self.one_by_one_setter.is_none() || &self.one_by_one_setter.clone().unwrap() != name {
+            if self.is_optional {
+                let it = self.inner_type.clone().unwrap();
+                q.extend(quote!(
+                    pub fn #name (&mut self, value: #it) -> &mut Self {
+                        self.#name = Some(Some(value));
+                        self
+                    }
+                ));
+            } else {
+                // normal setter
+                q.extend(quote!(
+                    pub fn #name (&mut self, value: #ty) -> &mut Self {
+                        self.#name = Some(value);
+                        self
+                    }
+                ));
+            }
+        }
+
+        q
+    }
+
+    /// This function creates individual lines used to initialize the *Foo*Builder struct
+    /// when the user calls `Builder::build()`. For example, if we have
+    /// ```rust
+    /// struct Foo {
+    ///     alpha: String,
+    ///     beta: Option<u8>,
+    ///     gamma: Vec<String>,
+    /// }
+    /// ```
+    /// then this function will generate one of the initialization lines for `Builder`, like
+    /// ```rust
+    /// # struct Foo {
+    ///     alpha: None,
+    /// # }
+    /// ```
+    fn get_build_initializer(&self) -> proc_macro2::TokenStream {
+        let mut q = quote!();
+        let name = &self.name;
+
+        if self.is_optional {
+            q.extend(quote!(
+                #name : if self.#name.is_some() {
+                    self.#name.take().unwrap()
+                } else {
+                    None
+                },
+            ));
+        } else {
+            // unwrap the Option and move it
+            q.extend(quote!(
+                #name : self.#name.take().unwrap(),
+            ));
+        }
+
+        q
+    }
+}
+
+fn create_builder_struct(builder_name: &Ident, fields: &Vec<AnnotatedField>) -> TokenStream {
+    let mut field_defs = quote!();
+    for field in fields {
+        field_defs.extend(field.get_builder_declaration());
+    }
+
+    TokenStream::from(quote!(
+        struct #builder_name {
+            #field_defs
+        }
+    ))
+}
+
+fn create_builder_function(
+    target_type: &Ident,
+    builder_type: &Ident,
+    fields: &Vec<AnnotatedField>,
+) -> TokenStream {
+    let mut initializers = quote!();
+    for field in fields {
+        initializers.extend(field.get_builder_initializer());
+    }
+
+    TokenStream::from(quote!(
+        impl #target_type {
+            pub fn builder() -> #builder_type {
+                #builder_type {
+                    #initializers
+                }
+            }
+        }
+    ))
+}
+
+fn create_setter_fns(builder_type: &Ident, fields: &Vec<AnnotatedField>) -> TokenStream {
+    let mut setters = quote!();
+    for field in fields {
+        setters.extend(field.get_builder_setter());
+    }
+
+    TokenStream::from(quote!(
+        impl #builder_type {
+            #setters
+        }
+    ))
+}
+
+fn create_build_fn(
+    target_type: &Ident,
+    builder_type: &Ident,
+    fields: &Vec<AnnotatedField>,
+) -> TokenStream {
+    let mut initializers = quote!();
+    for field in fields {
+        initializers.extend(field.get_build_initializer());
+    }
+
+    TokenStream::from(quote!(
+        impl #builder_type {
+            pub fn build(&mut self) -> Option<#target_type> {
+                Some( #target_type {
+                    #initializers
+                } )
+            }
+        }
+    ))
+}
+
 #[allow(clippy::missing_panics_doc, clippy::too_many_lines)]
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let mut res = TokenStream::new();
 
@@ -15,112 +297,68 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let struct_name = derive_input.ident;
     let builder = Ident::new(&format!("{struct_name}Builder"), Span::call_site().into());
 
-    // build a vec of quotes for each arg and its type
-    let mut field_definitions = quote!();
-    let mut field_initializations = quote!();
-    let mut build_initializations = quote!();
+    let mut annotated_fields: Vec<AnnotatedField> = vec![];
     #[allow(clippy::single_match)]
     match &derive_input.data {
         syn::Data::Struct(data) => match &data.fields {
             syn::Fields::Named(fields) => {
                 for f in &fields.named {
-                    let ident = &f.ident;
-                    let ty = &f.ty;
-                    field_definitions.extend(quote!(
-                        #ident : Option<#ty>,
-                    ));
-                    field_initializations.extend(quote!(
-                        #ident : None,
-                    ));
+                    annotated_fields.push(f.into());
                 }
             }
-            syn::Fields::Unnamed(_) | syn::Fields::Unit => unimplemented!(),
+            _ => (),
         },
         _ => (),
     }
 
-    res.extend(TokenStream::from(quote!(
-        pub struct #builder {
-            #field_definitions
-        }
-    )));
+    // create TypeBuilder struct
+    res.extend(create_builder_struct(&builder, &annotated_fields));
 
-    res.extend(TokenStream::from(quote!(
-        impl #struct_name {
-            pub fn builder() -> #builder {
-                #builder {
-                    #field_initializations
-                }
-            }
-        }
-    )));
+    // create builder fn
+    res.extend(create_builder_function(
+        &struct_name,
+        &builder,
+        &annotated_fields,
+    ));
 
-    match &derive_input.data {
-        syn::Data::Struct(data) => match &data.fields {
-            syn::Fields::Named(ref fields) => {
-                for f in &fields.named {
-                    let name = &f.ident;
-                    let typ = &f.ty;
+    // create setter functions in original struct
+    res.extend(create_setter_fns(&builder, &annotated_fields));
 
-                    let opt_typ = get_option_type(f);
-                    if let Some(t) = opt_typ {
-                        let q = quote!(
-                            impl #builder {
-                                pub fn #name (&mut self, #name : #t) -> &mut Self {
-                                    self.#name = Some(Some(#name));
-                                    self
+    // create build fn
+    res.extend(create_build_fn(&struct_name, &builder, &annotated_fields));
+
+    res
+}
+
+fn get_each_setter(f: &syn::Field) -> Option<Ident> {
+    for a in &f.attrs {
+        eprintln!("Attr {}", a.to_token_stream());
+        if let Some(ident) = a.path().get_ident() {
+            if ident == &Ident::new("builder", Span::call_site().into()) {
+                eprintln!("Found an each! {}", a.path().to_token_stream());
+                if let Meta::List(list) = &a.meta {
+                    eprintln!("list = {}", list.path.to_token_stream());
+                    let mnv = list
+                        .parse_args_with(MetaNameValue::parse)
+                        .expect("Able to parse each = name");
+                    eprintln!("mnv.path {}", mnv.path.to_token_stream()); // each
+                    eprintln!("mnv.value {}", mnv.value.to_token_stream()); // "arg"
+                    if let Some(i) = mnv.path.get_ident() {
+                        if i == &Ident::new("each", Span::call_site().into()) {
+                            if let Expr::Lit(name) = mnv.value {
+                                if let Lit::Str(lstr) = name.lit {
+                                    let s = lstr.value();
+                                    eprintln!("each setter is {s}");
+                                    return Some(Ident::new(&s, Span::call_site().into()));
                                 }
                             }
-                        );
-                        res.extend(TokenStream::from(q));
-                        build_initializations.extend(quote!(
-                            #name: if self.#name.is_some() {
-                                self.#name.take().unwrap()
-                            } else {
-                                None
-                            },
-                        ));
-                    } else {
-                        let q = quote!(
-                            impl #builder {
-                                pub fn #name (&mut self, #name : #typ) -> &mut Self {
-                                    self.#name = Some(#name);
-                                    self
-                                }
-                            }
-                        );
-                        res.extend(TokenStream::from(q));
-                        build_initializations.extend(quote!(
-                            #name: self.#name.take().unwrap(),
-                        ));
+                        }
                     }
                 }
             }
-            syn::Fields::Unnamed(_) | syn::Fields::Unit => unimplemented!(),
-        },
-        syn::Data::Enum(_) | syn::Data::Union(_) => unimplemented!(),
-    }
-
-    // builder.build()
-    // builder.current_dir = Option<Option<Foo>>
-    // so it could be:
-    // - None
-    // - Some(None)
-    // - Some(Some(foo))
-    let q = quote!(
-        impl #builder {
-            pub fn build(&mut self) -> Result<#struct_name, Box<dyn std::error::Error>> {
-                let s = #struct_name {
-                    #build_initializations
-                };
-                Ok(s)
-            }
         }
-    );
-
-    res.extend(TokenStream::from(q));
-
-    res
+    }
+    None
 }
 
 fn get_option_type(field: &syn::Field) -> Option<&syn::Type> {
@@ -131,12 +369,16 @@ fn get_option_type(field: &syn::Field) -> Option<&syn::Type> {
         if path.qself.is_none() {
             // only one thing inside the Option (Option takes a single generic argument)
             if path.path.segments.len() == 1 {
-                let segment = path.path.segments.first().unwrap();
+                let segment = path
+                    .path
+                    .segments
+                    .first()
+                    .expect("path segments has a segment");
                 let ident = &segment.ident;
                 // are we an Option?
                 if ident == &Ident::new("Option", Span::call_site().into()) {
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        let a = args.args.first().unwrap();
+                        let a = args.args.first().expect("args has a generic argument");
                         match a {
                             syn::GenericArgument::Type(t) => {
                                 return Some(t);
@@ -144,6 +386,40 @@ fn get_option_type(field: &syn::Field) -> Option<&syn::Type> {
                             _ => unimplemented!(),
                         }
                     }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn get_vec_type(field: &syn::Field) -> Option<&syn::Type> {
+    let typ = &field.ty;
+
+    if let syn::Type::Path(path) = typ {
+        #[allow(clippy::collapsible_if)]
+        if path.qself.is_none() {
+            // only one thing inside the Vec (Vec takes a single generic argument)
+            if path.path.segments.len() == 1 {
+                let segment = path
+                    .path
+                    .segments
+                    .first()
+                    .expect("path segments has a segment");
+                let ident = &segment.ident;
+                // are we an Vec?
+                if ident == &Ident::new("Vec", Span::call_site().into()) {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        let a = args.args.first().expect("args has a generic argument");
+                        match a {
+                            syn::GenericArgument::Type(t) => {
+                                return Some(t);
+                            }
+                            _ => unimplemented!(),
+                        }
+                    }
+                } else {
+                    panic!("Did not have a vec!");
                 }
             }
         }
