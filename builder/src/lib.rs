@@ -1,6 +1,5 @@
 use proc_macro::{Span, TokenStream};
 use quote::quote;
-use quote::ToTokens;
 
 use syn::parse::Parse;
 use syn::Expr;
@@ -20,12 +19,14 @@ struct AnnotatedField {
     is_optional: bool,
     /// Optional name of a one-by-one setter function, declared via:
     /// ```rust
+    /// # use derive_builder::Builder;
+    /// # #[derive(Builder)]
     /// # struct Foo {
-    ///     #[builder(each = baz)]
+    ///     #[builder(each = "my_field_setter")]
     ///     my_field: Vec<String>,
     /// # }
     /// ```
-    /// In this case, a setter function named `baz` will be created that adds to the
+    /// In this case, a setter function named `my_field_setter` will be created that adds to the
     /// growing `Vec<String>`, taking a `String`, and can be called repeatedly.
     one_by_one_setter: Option<Ident>,
     /// If the field is an `Option` field, this type will represent what `Type` is in
@@ -100,7 +101,12 @@ impl AnnotatedField {
     /// then this function will generate one of the initialization lines for *Foo*Builder, like
     /// ```rust
     /// # struct Foo {
+    /// #     alpha: Option<String>,
+    /// # }
+    /// # fn t() -> Foo {
+    /// # Foo {
     ///     alpha: None,
+    /// # }
     /// # }
     /// ```
     /// Note that in general the builder will default to a `None` value, since the builder
@@ -129,6 +135,9 @@ impl AnnotatedField {
     /// ```
     /// then this function will generate one of the setter functions for *Foo*Builder, like
     /// ```rust
+    /// # struct FooBuilder {
+    /// #     alpha: Option<String>,
+    /// # }
     /// impl FooBuilder {
     ///     pub fn alpha(&mut self, alpha: String) -> &mut Self {
     ///         self.alpha = Some(alpha);
@@ -191,7 +200,12 @@ impl AnnotatedField {
     /// then this function will generate one of the initialization lines for `Builder`, like
     /// ```rust
     /// # struct Foo {
+    /// #     alpha: Option<String>,
+    /// # }
+    /// # fn t() -> Foo {
+    /// # Foo {
     ///     alpha: None,
+    /// # }
     /// # }
     /// ```
     fn get_build_initializer(&self) -> proc_macro2::TokenStream {
@@ -332,23 +346,23 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
 fn get_each_setter(f: &syn::Field) -> Option<Ident> {
     for a in &f.attrs {
-        eprintln!("Attr {}", a.to_token_stream());
+        //eprintln!("Attr {}", a.to_token_stream());
         if let Some(ident) = a.path().get_ident() {
             if ident == &Ident::new("builder", Span::call_site().into()) {
-                eprintln!("Found an each! {}", a.path().to_token_stream());
+                //eprintln!("Found an each! {}", a.path().to_token_stream());
                 if let Meta::List(list) = &a.meta {
-                    eprintln!("list = {}", list.path.to_token_stream());
+                    //eprintln!("list = {}", list.path.to_token_stream());
                     let mnv = list
                         .parse_args_with(MetaNameValue::parse)
                         .expect("Able to parse each = name");
-                    eprintln!("mnv.path {}", mnv.path.to_token_stream()); // each
-                    eprintln!("mnv.value {}", mnv.value.to_token_stream()); // "arg"
+                    //eprintln!("mnv.path {}", mnv.path.to_token_stream()); // each
+                    //eprintln!("mnv.value {}", mnv.value.to_token_stream()); // "arg"
                     if let Some(i) = mnv.path.get_ident() {
                         if i == &Ident::new("each", Span::call_site().into()) {
                             if let Expr::Lit(name) = mnv.value {
                                 if let Lit::Str(lstr) = name.lit {
                                     let s = lstr.value();
-                                    eprintln!("each setter is {s}");
+                                    //eprintln!("each setter is {s}");
                                     return Some(Ident::new(&s, Span::call_site().into()));
                                 }
                             }
