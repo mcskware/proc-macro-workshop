@@ -88,7 +88,7 @@ impl AnnotatedField {
         let name = &self.name;
         let ty = &self.ty;
         quote!(
-            #name : Option<#ty>,
+            #name : std::option::Option<#ty>,
         )
     }
 
@@ -118,11 +118,11 @@ impl AnnotatedField {
         let name = &self.name;
         if self.one_by_one_setter.is_some() {
             quote!(
-                #name : Some(Vec::new()),
+                #name : std::option::Option::Some(std::vec::Vec::new()),
             )
         } else {
             quote!(
-                #name : None,
+                #name : std::option::Option::None,
             )
         }
     }
@@ -177,7 +177,7 @@ impl AnnotatedField {
                 let it = self.inner_type.clone().unwrap();
                 q.extend(quote!(
                     pub fn #name (&mut self, value: #it) -> &mut Self {
-                        self.#name = Some(Some(value));
+                        self.#name = std::option::Option::Some(std::option::Option::Some(value));
                         self
                     }
                 ));
@@ -185,7 +185,7 @@ impl AnnotatedField {
                 // normal setter
                 q.extend(quote!(
                     pub fn #name (&mut self, value: #ty) -> &mut Self {
-                        self.#name = Some(value);
+                        self.#name = std::option::Option::Some(value);
                         self
                     }
                 ));
@@ -224,7 +224,7 @@ impl AnnotatedField {
                 #name : if self.#name.is_some() {
                     self.#name.take().unwrap()
                 } else {
-                    None
+                    std::option::Option::None
                 },
             ));
         } else {
@@ -297,8 +297,8 @@ fn create_build_fn(
 
     TokenStream::from(quote!(
         impl #builder_type {
-            pub fn build(&mut self) -> Option<#target_type> {
-                Some( #target_type {
+            pub fn build(&mut self) -> std::option::Option<#target_type> {
+                std::option::Option::Some( #target_type {
                     #initializers
                 } )
             }
